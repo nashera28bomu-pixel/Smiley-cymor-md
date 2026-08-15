@@ -1,17 +1,13 @@
 name: Extract Zip to Root
 
 # Trigger manually from the GitHub Actions tab (mobile-friendly: no PC needed).
-# Upload your zip file to the repo root first (via GitHub's web "Add file" -> "Upload files"),
-# then run this workflow and give it the exact filename.
+# Just upload any zip file to the repo root via GitHub's web "Add file" -> "Upload files",
+# then run this workflow. It auto-detects every .zip file in the root and extracts it.
 on:
   workflow_dispatch:
     inputs:
-      zip_filename:
-        description: "Name of the zip file in the repo root (e.g. Rumionbot-main.zip)"
-        required: true
-        default: "Rumionbot-main.zip"
       delete_zip_after:
-        description: "Delete the zip file after extracting?"
+        description: "Delete the zip file(s) after extracting?"
         required: true
         default: "true"
         type: choice
@@ -29,37 +25,45 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Verify zip exists
+      - name: Find zip files in root
+        id: findzips
         run: |
-          if [ ! -f "${{ github.event.inputs.zip_filename }}" ]; then
-            echo "::error::File '${{ github.event.inputs.zip_filename }}' not found in repo root."
+          shopt -s nullglob
+          zips=(*.zip)
+          if [ "${#zips[@]}" -eq 0 ]; then
+            echo "::error::No .zip file found in repo root. Upload one first."
             exit 1
           fi
+          echo "Found zip(s): ${zips[*]}"
+          printf '%s\n' "${zips[@]}" > /tmp/zip_list.txt
 
-      - name: Extract zip to a staging folder
+      - name: Extract each zip and flatten
         run: |
-          mkdir -p __extracted__
-          unzip -o "${{ github.event.inputs.zip_filename }}" -d __extracted__
+          shopt -s dotglob
+          while IFS= read -r zipfile; do
+            echo "== Extracting: $zipfile =="
+            staging="__extracted__"
+            rm -rf "$staging"
+            mkdir -p "$staging"
+            unzip -o "$zipfile" -d "$staging"
 
-      - name: Flatten single top-level folder (if present)
-        run: |
-          cd __extracted__
-          entries=(*)
-          if [ "${#entries[@]}" -eq 1 ] && [ -d "${entries[0]}" ]; then
-            echo "Flattening top-level folder: ${entries[0]}"
-            shopt -s dotglob
-            mv "${entries[0]}"/* ../
-          else
-            shopt -s dotglob
-            mv * ../
-          fi
+            pushd "$staging" > /dev/null
+            entries=(*)
+            if [ "${#entries[@]}" -eq 1 ] && [ -d "${entries[0]}" ]; then
+              echo "Flattening top-level folder: ${entries[0]}"
+              mv "${entries[0]}"/* ../ 2>/dev/null || true
+              mv "${entries[0]}"/.[!.]* ../ 2>/dev/null || true
+            else
+              mv * ../ 2>/dev/null || true
+              mv .[!.]* ../ 2>/dev/null || true
+            fi
+            popd > /dev/null
+            rm -rf "$staging"
 
-      - name: Clean up staging folder and zip
-        run: |
-          rm -rf __extracted__
-          if [ "${{ github.event.inputs.delete_zip_after }}" = "true" ]; then
-            rm -f "${{ github.event.inputs.zip_filename }}"
-          fi
+            if [ "${{ github.event.inputs.delete_zip_after }}" = "true" ]; then
+              rm -f "$zipfile"
+            fi
+          done < /tmp/zip_list.txt
 
       - name: Commit and push extracted files
         run: |
@@ -69,6 +73,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "Nothing to commit."
           else
-            git commit -m "chore: extract ${{ github.event.inputs.zip_filename }} to repo root"
+            git commit -m "chore: extract uploaded zip(s) to repo root"
             git push
           fi
